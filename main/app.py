@@ -73,6 +73,12 @@ class SentimentAnalyzer:
 
 class StreamlitChatbot:
     def __init__(self):
+        # Initialize session state variables
+        self.init_session_state()
+        self.sentiment_analyzer = st.session_state.sentiment_analyzer
+    
+    def init_session_state(self):
+        """Initialize all session state variables"""
         if 'knowledge_base' not in st.session_state:
             st.session_state.knowledge_base = {}
         
@@ -81,6 +87,9 @@ class StreamlitChatbot:
         
         if 'chat_history' not in st.session_state:
             st.session_state.chat_history = []
+        
+        if 'csv_loaded' not in st.session_state:
+            st.session_state.csv_loaded = False
         
         self.responses = {
             'greeting': [
@@ -129,20 +138,17 @@ class StreamlitChatbot:
     def load_csv_from_upload(self, uploaded_file):
         """Load Q&A pairs from uploaded CSV file"""
         try:
-            # Read the uploaded file
-            content = uploaded_file.read()
-            if isinstance(content, bytes):
-                content = content.decode('utf-8')
+            # Reset file pointer
+            uploaded_file.seek(0)
             
-            # Parse CSV
-            csv_reader = csv.DictReader(StringIO(content))
-            fieldnames = csv_reader.fieldnames
+            # Read using pandas for better handling
+            df = pd.read_csv(uploaded_file)
             
             # Find question and answer columns
             question_col = None
             answer_col = None
             
-            for col in fieldnames:
+            for col in df.columns:
                 col_lower = col.lower().strip()
                 if col_lower in ['question', 'questions', 'q', 'query']:
                     question_col = col
@@ -150,7 +156,7 @@ class StreamlitChatbot:
                     answer_col = col
             
             if not question_col or not answer_col:
-                st.error(f"Could not find Question and Answer columns. Available columns: {fieldnames}")
+                st.error(f"Could not find Question and Answer columns. Available columns: {list(df.columns)}")
                 st.info("Please make sure your CSV has columns named 'Question' and 'Answer' (or similar variations)")
                 return False
             
@@ -159,14 +165,15 @@ class StreamlitChatbot:
             
             # Load the data
             count = 0
-            for row in csv_reader:
-                question = row.get(question_col, '').strip()
-                answer = row.get(answer_col, '').strip()
+            for _, row in df.iterrows():
+                question = str(row.get(question_col, '')).strip()
+                answer = str(row.get(answer_col, '')).strip()
                 
-                if question and answer:  # Skip empty rows
+                if question and answer and question != 'nan' and answer != 'nan':
                     self.add_to_knowledge_base(question, answer)
                     count += 1
             
+            st.session_state.csv_loaded = True
             st.success(f"Successfully loaded {count} Q&A pairs!")
             return count > 0
                 
@@ -281,7 +288,7 @@ class StreamlitChatbot:
             return "Please ask me something!"
         
         # Analyze sentiment first
-        sentiment_data = st.session_state.sentiment_analyzer.analyze_sentiment(user_input)
+        sentiment_data = self.sentiment_analyzer.analyze_sentiment(user_input)
         
         intent = self.detect_intent(user_input)
         
@@ -327,8 +334,7 @@ def main():
     )
     
     # Initialize chatbot
-    if 'chatbot' not in st.session_state:
-        st.session_state.chatbot = StreamlitChatbot()
+    chatbot = StreamlitChatbot()
     
     # Title and description
     st.title("🤖 IT Support Chatbot with Sentiment Analysis")
@@ -342,13 +348,15 @@ def main():
         uploaded_file = st.file_uploader(
             "Upload CSV File",
             type=['csv'],
-            help="Upload a CSV file with 'Question' and 'Answer' columns"
+            help="Upload a CSV file with 'Question' and 'Answer' columns",
+            key="csv_uploader"
         )
         
         if uploaded_file is not None:
-            if st.button("Load CSV File"):
+            if st.button("Load CSV File", key="load_button"):
                 with st.spinner("Loading CSV file..."):
-                    if st.session_state.chatbot.load_csv_from_upload(uploaded_file):
+                    success = chatbot.load_csv_from_upload(uploaded_file)
+                    if success:
                         st.rerun()
         
         # Knowledge base stats
@@ -369,13 +377,13 @@ def main():
                 st.write(f"... and {kb_size - 5} more questions")
         
         # Clear chat history button
-        if st.button("🗑️ Clear Chat History"):
+        if st.button("🗑️ Clear Chat History", key="clear_button"):
             st.session_state.chat_history = []
             st.rerun()
         
         # Sentiment analysis toggle
         st.header("🎭 Sentiment Analysis")
-        show_sentiment = st.checkbox("Show sentiment analysis", value=False)
+        show_sentiment = st.checkbox("Show sentiment analysis", value=False, key="sentiment_toggle")
     
     # Main chat interface
     col1, col2 = st.columns([2, 1])
@@ -384,41 +392,39 @@ def main():
         st.header("💬 Chat")
         
         # Display chat history
-        chat_container = st.container()
-        with chat_container:
-            for message in st.session_state.chat_history:
-                with st.chat_message(message["role"]):
-                    st.write(message["content"])
+        for i, message in enumerate(st.session_state.chat_history):
+            with st.chat_message(message["role"]):
+                st.write(message["content"])
+                
+                # Show sentiment analysis if enabled
+                if message["role"] == "user" and show_sentiment and "sentiment" in message:
+                    sentiment = message["sentiment"]
                     
-                    # Show sentiment analysis if enabled
-                    if message["role"] == "user" and show_sentiment and "sentiment" in message:
-                        sentiment = message["sentiment"]
-                        
-                        # Create sentiment display
-                        sentiment_cols = st.columns(4)
-                        with sentiment_cols[0]:
-                            color = "green" if sentiment['sentiment'] == "positive" else "red" if sentiment['sentiment'] == "negative" else "gray"
-                            st.markdown(f"**Sentiment:** :{color}[{sentiment['sentiment'].title()}]")
-                        
-                        with sentiment_cols[1]:
-                            if sentiment['is_urgent']:
-                                st.markdown("🚨 **Urgent**")
-                        
-                        with sentiment_cols[2]:
-                            if sentiment['is_frustrated']:
-                                st.markdown("😤 **Frustrated**")
-                        
-                        with sentiment_cols[3]:
-                            if sentiment['is_confused']:
-                                st.markdown("😕 **Confused**")
+                    # Create sentiment display
+                    sentiment_cols = st.columns(4)
+                    with sentiment_cols[0]:
+                        color = "green" if sentiment['sentiment'] == "positive" else "red" if sentiment['sentiment'] == "negative" else "gray"
+                        st.markdown(f"**Sentiment:** :{color}[{sentiment['sentiment'].title()}]")
+                    
+                    with sentiment_cols[1]:
+                        if sentiment['is_urgent']:
+                            st.markdown("🚨 **Urgent**")
+                    
+                    with sentiment_cols[2]:
+                        if sentiment['is_frustrated']:
+                            st.markdown("😤 **Frustrated**")
+                    
+                    with sentiment_cols[3]:
+                        if sentiment['is_confused']:
+                            st.markdown("😕 **Confused**")
         
         # Chat input
         if kb_size > 0:
-            user_input = st.chat_input("Ask your IT question here...")
+            user_input = st.chat_input("Ask your IT question here...", key="chat_input")
             
             if user_input:
                 # Analyze sentiment
-                sentiment_data = st.session_state.sentiment_analyzer.analyze_sentiment(user_input)
+                sentiment_data = chatbot.sentiment_analyzer.analyze_sentiment(user_input)
                 
                 # Add user message to history
                 st.session_state.chat_history.append({
@@ -428,7 +434,7 @@ def main():
                 })
                 
                 # Get bot response
-                response = st.session_state.chatbot.get_response(user_input)
+                response = chatbot.get_response(user_input)
                 
                 # Add bot response to history
                 st.session_state.chat_history.append({
@@ -465,10 +471,10 @@ def main():
         
         if kb_size > 0:
             st.header("🔍 Test Sentiment Analysis")
-            test_input = st.text_input("Enter text to analyze sentiment:")
+            test_input = st.text_input("Enter text to analyze sentiment:", key="test_sentiment")
             
             if test_input:
-                sentiment = st.session_state.sentiment_analyzer.analyze_sentiment(test_input)
+                sentiment = chatbot.sentiment_analyzer.analyze_sentiment(test_input)
                 
                 # Display sentiment analysis results
                 st.subheader("Analysis Results:")
@@ -517,9 +523,9 @@ def main():
             label="Download Sample CSV",
             data=csv_sample,
             file_name="sample_it_qa.csv",
-            mime="text/csv"
+            mime="text/csv",
+            key="download_sample"
         )
 
 if __name__ == "__main__":
     main()
-    
